@@ -21,6 +21,7 @@
 use strict;
 use warnings;
 use utf8;
+use Config::Tiny;
 use AnyEvent;
 use AnyEvent::Loop;
 use AnyEvent::Handle::UDP;
@@ -28,7 +29,12 @@ use AnyEvent::Handle::UDP;
 sub onrecieve;
 sub ontimer;
 
-my $myid = 1;
+my $config = Config::Tiny->new;
+$config = Config::Tiny->read( 'mysql_repl.conf' );
+
+my %selfstatus;
+$selfstatus{"id"} = $config->{settings}->{id};
+
 
 my %hosts;
 $hosts{"1"}->{"address"} = ["127.0.0.1",4000];
@@ -53,12 +59,12 @@ sub dbcheck{
 	my $time = AnyEvent->now;
 	if(check_db){ # check db status
 		for my $x(keys %hosts){
-			$udp->push_send("$myid:PING_OK;$time",$hosts{$x}->{"address"});
+			$udp->push_send(qq($selfstatus{"id"}:PING_OK;$time),$hosts{$x}->{"address"});
 		}
 	}
 	else{
 		for my $x(keys %hosts){
-			$udp->push_send("$myid:DB_DOWN;$time",$hosts{$x}->{"address"});
+			$udp->push_send(qq($selfstatus{"id"}:DB_DOWN;$time),$hosts{$x}->{"address"});
 		}	
 	}
 }
