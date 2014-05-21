@@ -8,7 +8,7 @@
 #  DESCRIPTION: 
 #
 #      OPTIONS: ---
-# REQUIREMENTS: ---
+# REQUIREMENTS: Config::Tiny, AnyEvent, AnyEvent::Loop, AnyEvent::Handle::UDP
 #         BUGS: ---
 #        NOTES: ---
 #       AUTHOR: Ilya Suhov (), tovarischsuhov0@yandex.ru
@@ -30,6 +30,8 @@ sub onrecieve;
 sub dbcheck;
 sub check_slave_status;
 sub get_address;
+sub get_ipv4;
+sub get_ipv6;
 
 ### Reading config
 
@@ -39,22 +41,28 @@ $config = Config::Tiny->read( 'mysql_repl.conf' );
 my %selfstatus;
 
 $selfstatus{"id"} = $config->{settings}->{id};
-$selfstatus{"hostname"} = $config->{settings}->{hostaname};
-$selfstatus{"port"} = $config->{settings}->{address};
+$selfstatus{"hostname"} = $config->{settings}->{hostname};
 $selfstatus{"protocol"} = $config->{settings}->{protocol};
+$selfstatus{maxdelay} = $config->{settings}->{maxdelay};
 
 $selfstatus{"port"} = 4000 if not defined $selfstatus{"port"};
 $selfstatus{"protocol"} = "IPv4" if not defined $selfstatus{"protocol"};
+$selfstatus{maxdelay} = 20 if not defined $selfstatus{maxdelay};
+
+
+$selfstatus{"address"} = get_address($selfstatus{"hostname"});
 
 my %hosts;
-$hosts{"1"}->{"address"} = ["127.0.0.1",4000];
-$hosts{"1"}->{"status"} = "";
-$hosts{"1"}->{"time"} = "";
+for my $x(keys %{$config}){
+	if($x =~ /host\d+/){
+	$hosts{$config->{$x}->{id}}->{address} = get_address($config->{$x}->{address});
+	}
+}
 
 my $signal = AnyEvent->signal (signal => "TERM", cb => sub {exit 0});
 
 my $udp = AnyEvent::Handle::UDP->new(
-	bind => ["0.0.0.0", 4000],
+	bind => ["0.0.0.0", $selfstatus{"port"}],
 	on_recv => \&onrecieve,
 );
 
@@ -62,10 +70,6 @@ my $dbcheck = AnyEvent->timer(interval => 5, cb => \&dbcheck);
 my $check_slaves = AnyEvent->timer(interval => 5, cb => \&check_slave_status);
 
 ###Here would be initialization part
-my $address = get_address;
-$udp->push_send(qq($selfstatus{"id"}:ASK_HOSTS;$address->[0];$address->[1];slave),);
-
-
 
 sub check_db{
 	return 1;
@@ -73,7 +77,10 @@ sub check_db{
 
 sub check_slave_status{
 	for my $x(keys %hosts){
-		warn $x;
+		if(AnyEvent->now - $hosts{$x}->{time} > $selfstatus{maxdelay}){
+		warn "Host #$x is droped now";
+		}
+		else{warn "Host #$x is OK"};
 	}
 }
 
@@ -81,6 +88,7 @@ sub dbcheck{
 	my $time = AnyEvent->now;
 	if(check_db){ # check db status
 		for my $x(keys %hosts){
+			warn qq(Send PING_OK to $x, $hosts{$x}->{"address"}->[0], $hosts{$x}->{"address"}->[1]);
 			$udp->push_send(qq($selfstatus{"id"}:PING_OK;$time),$hosts{$x}->{"address"});
 		}
 	}
@@ -98,7 +106,7 @@ sub onrecieve{
 	if($status eq "PING_OK"){ # status ok
 		$hosts{$id}->{"status"} = $status;
 		$hosts{$id}->{"time"} = $args;
-		warn qq($hosts{$id}->{"status"} $hosts{$id}->{"time"}); # debuging info
+		warn qq($id $hosts{$id}->{"status"} $hosts{$id}->{"time"}); # debuging info
 	}
 	elsif($status eq "DB_DOWN"){ # db is down
 	
@@ -125,13 +133,17 @@ sub onrecieve{
 
 sub get_address{
 	my $address;
-	my $hostname = $selfstatus{"hostname"};
-	my @ans = `host $hostname`;
+	my $hostname = shift;
 	if($selfstatus{"protocol"} eq "IPv6"){
-			
+			my $tmp = get_ipv6($hostname);
+			if (!defined $tmp){
+				$selfstatus{"protocol"} = "IPv4";
+				$address = get_address($hostname);
+			}
+			return [$tmp,$selfstatus{"port"}]
 	}
 	elsif($selfstatus{"protocol"} eq "IPv4"){
-		
+		   return [get_ipv4($hostname), $selfstatus{"port"}];
 	}
 	else{
 		warn qq(Unknown protocol $selfstatus{"protocol"})
@@ -139,6 +151,21 @@ sub get_address{
 	return $address;
 }
 
+sub get_ipv4{
+	my $hostname = shift;
+ 	if($hostname =~ /^((?:\d{1,3}\.){3}\d{1,3})$/){return $hostname}
+	my $hosts = `host $hostname`;
+	$hosts =~ /((?:\d{1,3}\.){3}\d{1,3})/m;
+	return $1;
+}
+
+sub get_ipv6{
+	my $hostname = shift;
+	if($hostname =~ /^([0-9a-f:]{4,})$/){return $hostname}
+	my $hosts = `host $hostname`;
+	$hosts =~ /([0-9a-f:]{4,})/m;
+	return $1;
+}
 
 AnyEvent::Loop::run; # main loop
 
