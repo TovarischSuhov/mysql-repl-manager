@@ -25,6 +25,8 @@ use Config::Tiny;
 use AnyEvent;
 use AnyEvent::Loop;
 use AnyEvent::Handle::UDP;
+use DBI;
+use DBD::mysql;
 
 sub onrecieve;
 sub dbcheck;
@@ -39,18 +41,24 @@ my $config = Config::Tiny->new;
 $config = Config::Tiny->read( 'mysql_repl.conf' );
 
 my %selfstatus;
+my %sql;
 
-$selfstatus{"id"} = $config->{settings}->{id};
-$selfstatus{"hostname"} = $config->{settings}->{hostname};
-$selfstatus{"protocol"} = $config->{settings}->{protocol};
+$selfstatus{id} = $config->{settings}->{id};
+$selfstatus{hostname} = $config->{settings}->{hostname};
+$selfstatus{protocol} = $config->{settings}->{protocol};
 $selfstatus{maxdelay} = $config->{settings}->{maxdelay};
+$selfstatus{port} = $config->{settings}->{port};
 
-$selfstatus{"port"} = 4000 if not defined $selfstatus{"port"};
-$selfstatus{"protocol"} = "IPv4" if not defined $selfstatus{"protocol"};
+$selfstatus{port} = 4000 if not defined $selfstatus{port};
+$selfstatus{protocol} = "IPv4" if not defined $selfstatus{protocol};
 $selfstatus{maxdelay} = 20 if not defined $selfstatus{maxdelay};
 
+$sql{user} = $config->{sql}->{user};
+$sql{passwd} = $config->{sql}->{passwd};
+$sql{root} = $config->{sql}->{root};
+$sql{rootpasswd} = $config->{sql}->{rootpasswd};
 
-$selfstatus{"address"} = get_address($selfstatus{"hostname"});
+$selfstatus{address} = get_address($selfstatus{hostname});
 
 my %hosts;
 for my $x(keys %{$config}){
@@ -72,6 +80,12 @@ my $check_slaves = AnyEvent->timer(interval => 5, cb => \&check_slave_status);
 ###Here would be initialization part
 
 sub check_db{
+	my $dbh = DBI->connect("DBI::mysql::database=mysql;host=localhost",
+							$sql{root}, $sql{rootpasswd});
+	return 0 if not defined $dbh;
+	eval{$dbh->do("SELECT * FROM User")};
+	return 0 if $@;
+	$dbh->disconnect;
 	return 1;
 }
 
@@ -88,13 +102,13 @@ sub dbcheck{
 	my $time = AnyEvent->now;
 	if(check_db){ # check db status
 		for my $x(keys %hosts){
-			warn qq(Send PING_OK to $x, $hosts{$x}->{"address"}->[0], $hosts{$x}->{"address"}->[1]);
-			$udp->push_send(qq($selfstatus{"id"}:PING_OK;$time),$hosts{$x}->{"address"});
+			warn qq(Send PING_OK to $x, $hosts{$x}->{address}->[0], $hosts{$x}->{address}->[1]);
+			$udp->push_send(qq($selfstatus{id}:PING_OK;$time),$hosts{$x}->{address});
 		}
 	}
 	else{
 		for my $x(keys %hosts){
-			$udp->push_send(qq($selfstatus{"id"}:DB_DOWN;$time),$hosts{$x}->{"address"});
+			$udp->push_send(qq($selfstatus{id}:DB_DOWN;$time),$hosts{$x}->{address});
 		}	
 	}
 }
@@ -105,8 +119,8 @@ sub onrecieve{
 	my($id ,$status, $args) = ($1, $2, $3);
 	if($status eq "PING_OK"){ # status ok
 		$hosts{$id}->{"status"} = $status;
-		$hosts{$id}->{"time"} = $args;
-		warn qq($id $hosts{$id}->{"status"} $hosts{$id}->{"time"}); # debuging info
+		$hosts{$id}->{time} = $args;
+		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
 	}
 	elsif($status eq "DB_DOWN"){ # db is down
 	
@@ -134,19 +148,19 @@ sub onrecieve{
 sub get_address{
 	my $address;
 	my $hostname = shift;
-	if($selfstatus{"protocol"} eq "IPv6"){
+	if($selfstatus{protocol} eq "IPv6"){
 			my $tmp = get_ipv6($hostname);
 			if (!defined $tmp){
-				$selfstatus{"protocol"} = "IPv4";
+				$selfstatus{protocol} = "IPv4";
 				$address = get_address($hostname);
 			}
-			return [$tmp,$selfstatus{"port"}]
+			return [$tmp,$selfstatus{port}]
 	}
-	elsif($selfstatus{"protocol"} eq "IPv4"){
-		   return [get_ipv4($hostname), $selfstatus{"port"}];
+	elsif($selfstatus{protocol} eq "IPv4"){
+		   return [get_ipv4($hostname), $selfstatus{port}];
 	}
 	else{
-		warn qq(Unknown protocol $selfstatus{"protocol"})
+		warn qq(Unknown protocol $selfstatus{protocol})
 	}
 	return $address;
 }
