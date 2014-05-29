@@ -8,7 +8,7 @@
 #  DESCRIPTION: 
 #
 #      OPTIONS: ---
-# REQUIREMENTS: Config::Tiny, AnyEvent, AnyEvent::Loop, AnyEvent::Handle::UDP
+# REQUIREMENTS: Config::Tiny, AnyEvent, AnyEvent::Loop, AnyEvent::Handle::UDP, DBI, DBD::mysql
 #         BUGS: ---
 #        NOTES: ---
 #       AUTHOR: Ilya Suhov (), tovarischsuhov0@yandex.ru
@@ -34,6 +34,7 @@ sub check_slave_status;
 sub get_address;
 sub get_ipv4;
 sub get_ipv6;
+sub switch_to;
 
 ### Reading config
 
@@ -64,6 +65,7 @@ my %hosts;
 for my $x(keys %{$config}){
 	if($x =~ /host\d+/){
 	$hosts{$config->{$x}->{id}}->{address} = get_address($config->{$x}->{address});
+	$hosts{$config->{$x}->{id}}->{status} = "PING_OK";
 	}
 }
 
@@ -80,10 +82,10 @@ my $check_slaves = AnyEvent->timer(interval => 5, cb => \&check_slave_status);
 ###Here would be initialization part
 
 sub check_db{
-	my $dbh = DBI->connect("DBI::mysql::database=mysql;host=localhost",
-							$sql{root}, $sql{rootpasswd});
+	my $dbh = DBI->connect("DBI:mysql:mysql",
+							$sql{root}, $sql{rootpasswd},{RaiseError => 0});
 	return 0 if not defined $dbh;
-	eval{$dbh->do("SELECT * FROM User")};
+	eval{$dbh->do("SELECT * FROM user")};
 	return 0 if $@;
 	$dbh->disconnect;
 	return 1;
@@ -91,7 +93,11 @@ sub check_db{
 
 sub check_slave_status{
 	for my $x(keys %hosts){
-		if(AnyEvent->now - $hosts{$x}->{time} > $selfstatus{maxdelay}){
+		if($hosts{$x}->{status} eq "DB_DOWN"){
+			warn "Host #$x is droped"
+		}
+		elsif(AnyEvent->now - $hosts{$x}->{time} > $selfstatus{maxdelay}){
+		$hosts{$x}->{status} = "DB_DOWN";
 		warn "Host #$x is droped now";
 		}
 		else{warn "Host #$x is OK"};
@@ -102,12 +108,13 @@ sub dbcheck{
 	my $time = AnyEvent->now;
 	if(check_db){ # check db status
 		for my $x(keys %hosts){
-			warn qq(Send PING_OK to $x, $hosts{$x}->{address}->[0], $hosts{$x}->{address}->[1]);
+#			warn qq(Send PING_OK to $x, $hosts{$x}->{address}->[0], $hosts{$x}->{address}->[1]);
 			$udp->push_send(qq($selfstatus{id}:PING_OK;$time),$hosts{$x}->{address});
 		}
 	}
 	else{
 		for my $x(keys %hosts){
+#			warn qq(Send DB_DOWN to $x, $hosts{$x}->{address}->[0], $hosts{$x}->{address}->[1]);
 			$udp->push_send(qq($selfstatus{id}:DB_DOWN;$time),$hosts{$x}->{address});
 		}	
 	}
@@ -120,24 +127,20 @@ sub onrecieve{
 	if($status eq "PING_OK"){ # status ok
 		$hosts{$id}->{"status"} = $status;
 		$hosts{$id}->{time} = $args;
-		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
+#		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
 	}
 	elsif($status eq "DB_DOWN"){ # db is down
-	
+		$hosts{$id}->{status} = $status;
+#		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
 	}
 	elsif($status eq "SWITCH_TO"){ # command switch
-
+		my($host, $file, $position) = split /;/,$args;
+		switch_to($host, $file,$position);
 	}
 	elsif($status eq "LOAD_FROM"){ # command to load
 
 	}
 	elsif($status eq "SWITCH_OVER"){ # command to master to switch_over
-
-	}
-	elsif($status eq "HOST_INFO"){ # send host info
-
-	}
-	elsif($status eq "ASK_HOSTS"){ # asks for hosts info
 
 	}
 	else{
@@ -181,6 +184,17 @@ sub get_ipv6{
 	return $1;
 }
 
+sub switch_to{
+	my $hostname = shift;
+	my $filename = shift;
+	my $position = shift;
+	my $query = qq(change master to master_host="$hostname", master_user="$sql{user}", master_password="$sql{passwd}", master_log_file="$filename", master_log_pos=$position);
+	my $dbh = DBI->connect("DBD:mysql:mysql", $sql{root}, $sql{rootpasswd});
+	eval {$dbh->do($query)};
+	$@ || warn qq(Couldn't done $query);
+	$dbh->disconnect;
+}
+
 AnyEvent::Loop::run; # main loop
 
 
@@ -192,13 +206,9 @@ __END__
 
 	ID:DB_DOWN;[time] - shows when DB on sender is down 
 
-	ID:SWITCH_TO;[host] - commands to switch master to host
+	ID:SWITCH_TO;[host;file;pos] - commands to switch master to host
 
 	ID:LOAD_FROM;[host] - commands to load DB dump from host
 
 	ID:SWITCH_OVER;[host] - commands master to switch master to host
 
-	ID:HOST_INFO;[address;port;role] - sends hosts info
-
-	ID:ASK_HOSTS;[address;port;role] - asks for hosts info, and send my info
-	
