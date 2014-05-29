@@ -81,6 +81,25 @@ my $check_slaves = AnyEvent->timer(interval => 5, cb => \&check_slave_status);
 
 ###Here would be initialization part
 
+my $dbh = DBI->connect("DBI:mysql:mysql",$sql{root},$sql{rootpasswd});
+my $sth = $dbh->prepare("SHOW SLAVE STATUS");
+$sth->execute();
+my $ref = $sth->fetchrow_hashref();
+
+if((not defined $ref) or ($ref->{Master_Host} eq $selfstatus{hostname})){
+	$selfstatus{role} = "master";
+} 
+else{
+	$selfstatus{role} = "slave";
+}
+
+$dbh->disconnect;
+
+for my $x (keys %hosts){
+	$udp->push_send(qq($selfstatus{id}:ASK_INFO;),$hosts{$x}->{address});
+	$udp->push_send(qq($selfstatus{id}:INFO;$selfstatus{role}),$hosts{$x}->{address})
+}
+
 sub check_db{
 	my $dbh = DBI->connect("DBI:mysql:mysql",
 							$sql{root}, $sql{rootpasswd},{RaiseError => 0});
@@ -122,7 +141,7 @@ sub dbcheck{
 
 sub onrecieve{
 	my ($data, $handle, $addr) = @_;
-	$data =~ /(\d+):([_A-Z]+);(.*)/;
+	$data =~ /(\d+):([_A-Z]+);(.*)?/;
 	my($id ,$status, $args) = ($1, $2, $3);
 	if($status eq "PING_OK"){ # status ok
 		$hosts{$id}->{"status"} = $status;
@@ -142,6 +161,12 @@ sub onrecieve{
 	}
 	elsif($status eq "SWITCH_OVER"){ # command to master to switch_over
 
+	}
+	elsif($status eq "ASK_INFO"){
+		$udp->push_send(qq($selfstatus{id}:INFO;$selfstatus{role}),$hosts{$id}->{address});
+	}
+	elsif($status eq "INFO"){
+		$hosts{$id}->{role} = $args;
 	}
 	else{
 		
@@ -189,7 +214,7 @@ sub switch_to{
 	my $filename = shift;
 	my $position = shift;
 	my $query = qq(change master to master_host="$hostname", master_user="$sql{user}", master_password="$sql{passwd}", master_log_file="$filename", master_log_pos=$position);
-	my $dbh = DBI->connect("DBD:mysql:mysql", $sql{root}, $sql{rootpasswd});
+	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	eval {$dbh->do($query)};
 	$@ || warn qq(Couldn't done $query);
 	$dbh->disconnect;
