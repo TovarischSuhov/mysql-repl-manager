@@ -168,6 +168,9 @@ sub onrecieve{
 	elsif($status eq "INFO"){
 		$hosts{$id}->{role} = $args;
 	}
+	elsif($status eq "VOTE"){
+
+	}
 	else{
 		
 	}	
@@ -237,3 +240,8 @@ __END__
 
 	ID:SWITCH_OVER;[host] - commands master to switch master to host
 
+	ID:ASK_INFO; - asks about roles
+
+	ID:INFO;[role] - tells role (master, slave)
+
+	ID:VOTE;[id] - votes for host with id
