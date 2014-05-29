@@ -35,6 +35,7 @@ sub get_address;
 sub get_ipv4;
 sub get_ipv6;
 sub switch_to;
+sub switchover;
 
 ### Reading config
 
@@ -43,6 +44,7 @@ $config = Config::Tiny->read( 'mysql_repl.conf' );
 
 my %selfstatus;
 my %sql;
+my $master;
 
 $selfstatus{id} = $config->{settings}->{id};
 $selfstatus{hostname} = $config->{settings}->{hostname};
@@ -65,6 +67,7 @@ my %hosts;
 for my $x(keys %{$config}){
 	if($x =~ /host\d+/){
 	$hosts{$config->{$x}->{id}}->{address} = get_address($config->{$x}->{address});
+	$hosts{$config->{$x}->{id}}->{host} = $config->{$x}->{address};
 	$hosts{$config->{$x}->{id}}->{status} = "PING_OK";
 	}
 }
@@ -72,7 +75,7 @@ for my $x(keys %{$config}){
 my $signal = AnyEvent->signal (signal => "TERM", cb => sub {exit 0});
 
 my $udp = AnyEvent::Handle::UDP->new(
-	bind => ["0.0.0.0", $selfstatus{"port"}],
+	bind => ["0.0.0.0", $selfstatus{port}],
 	on_recv => \&onrecieve,
 );
 
@@ -83,8 +86,8 @@ my $check_slaves = AnyEvent->timer(interval => 5, cb => \&check_slave_status);
 
 my $dbh = DBI->connect("DBI:mysql:mysql",$sql{root},$sql{rootpasswd});
 my $sth = $dbh->prepare("SHOW SLAVE STATUS");
-$sth->execute();
-my $ref = $sth->fetchrow_hashref();
+$sth->execute;
+my $ref = $sth->fetchrow_hashref;
 
 if((not defined $ref) or ($ref->{Master_Host} eq $selfstatus{hostname})){
 	$selfstatus{role} = "master";
@@ -92,7 +95,7 @@ if((not defined $ref) or ($ref->{Master_Host} eq $selfstatus{hostname})){
 else{
 	$selfstatus{role} = "slave";
 }
-
+$sth->finish;
 $dbh->disconnect;
 
 for my $x (keys %hosts){
@@ -111,11 +114,12 @@ sub check_db{
 }
 
 sub check_slave_status{
+	my $time = AnyEvent->now;
 	for my $x(keys %hosts){
 		if($hosts{$x}->{status} eq "DB_DOWN"){
-			warn "Host #$x is droped"
+			warn "Host #$x is droped";
 		}
-		elsif(AnyEvent->now - $hosts{$x}->{time} > $selfstatus{maxdelay}){
+		elsif($time - $hosts{$x}->{time} > $selfstatus{maxdelay}){
 		$hosts{$x}->{status} = "DB_DOWN";
 		warn "Host #$x is droped now";
 		}
@@ -144,7 +148,7 @@ sub onrecieve{
 	$data =~ /(\d+):([_A-Z]+);(.*)?/;
 	my($id ,$status, $args) = ($1, $2, $3);
 	if($status eq "PING_OK"){ # status ok
-		$hosts{$id}->{"status"} = $status;
+		$hosts{$id}->{status} = $status;
 		$hosts{$id}->{time} = $args;
 #		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
 	}
@@ -153,27 +157,48 @@ sub onrecieve{
 #		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
 	}
 	elsif($status eq "SWITCH_TO"){ # command switch
-		my($host, $file, $position) = split /;/,$args;
-		switch_to($host, $file,$position);
+		my($id, $file, $position) = split /;/,$args;
+		switch_to($hosts{$id}->{host}, $file,$position);
+		$master = $id;
 	}
 	elsif($status eq "LOAD_FROM"){ # command to load
-
+			
 	}
 	elsif($status eq "SWITCH_OVER"){ # command to master to switch_over
-
+		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
+		$dbh->do("FLUSH TABLES WITH READ LOCK");
+		$dbh->disconnect;
+		for my $x(keys %hosts){
+			$udp->push_send(qq($selfstatus{$id}:START_VOTE;), $hosts{$x}->{address});
+		}
+		my $tmp = AnyEvent->timer(after => 5, cb => \&switchover)
+		
 	}
 	elsif($status eq "ASK_INFO"){
-		$udp->push_send(qq($selfstatus{id}:INFO;$selfstatus{role}),$hosts{$id}->{address});
+		$udp->push_send(qq($selfstatus{id}:INFO;$selfstatus{role}), $hosts{$id}->{address});
 	}
 	elsif($status eq "INFO"){
 		$hosts{$id}->{role} = $args;
+		if($args eq "master"){
+			$master = $id;
+		}
 	}
 	elsif($status eq "VOTE"){
-
+		my($id, $time) = split /;/, $args;
+		$hosts{$id}->{vote}->{id} = $id;
+		$hosts{$id}->{vote}->{time} = $time;
 	}
-	else{
-		
-	}	
+	elsif($status eq "START_VOTE"){
+		my @tmp;
+		my $time = AnyEvent->now;
+		for my $x(keys %hosts){
+			if($hosts{$x}->{status} eq "PING_OK"){
+				push @tmp, $x;
+			}
+		}
+		my $select = int(rand(scalar @tmp));
+		$udp->push_send(qq($selfstatus{id}:VOTE;@tmp[$select]), $hosts{$id}->{address});
+	}
 }
 
 sub get_address{
@@ -223,6 +248,37 @@ sub switch_to{
 	$dbh->disconnect;
 }
 
+sub switchover{
+	my @tmp;
+	my $max = 0;
+	my $maxvote;
+	my $time = AnyEvent->now;
+	for my $x(keys %hosts){
+		if($time - $hosts{$x}->{vote}->{time} < $selfstatus{maxdelay} && $hosts{$x}->{status} eq "PING_OK"){
+			$tmp[$hosts{$x}->{vote}->{id}]++;
+		}
+	}
+	for(my $i; $i<scalar(@tmp);$i++){
+		if($tmp[$i] > $max){
+			$max = $tmp[$i];
+			$maxvote = $i;
+		}
+	}
+	my $dbh = DBI->connect("DBI:mysql:mysql", $selfstatus{root}, $selfstatus{rootpasswd});
+	my $sth = $dbh->prepare("SHOW MASTER STATUS");
+	$sth->execute;
+	my $ref = $sth->fetchrow_hashref;
+	$sth->finish;
+	$dbh->disconnect;
+
+	my $file = $ref->{File};
+	my $pos = $ref->{Position};
+	for my $x(keys %hosts){
+		$udp->push_send(qq($selfstatus{$id}:SWITCH_TO;$maxvote;$file;$pos), $hosts{$x}->{address});
+	}
+	$udp->push_send(qq($selfstatus{$id}:SWITCH_TO;$maxvote;$file;$pos), $selfstatus{address});
+}
+
 AnyEvent::Loop::run; # main loop
 
 
@@ -234,14 +290,16 @@ __END__
 
 	ID:DB_DOWN;[time] - shows when DB on sender is down 
 
-	ID:SWITCH_TO;[host;file;pos] - commands to switch master to host
+	ID:SWITCH_TO;[id;file;pos] - commands to switch master to host
 
-	ID:LOAD_FROM;[host] - commands to load DB dump from host
+	ID:LOAD_FROM;[id] - commands to load DB dump from host
 
-	ID:SWITCH_OVER;[host] - commands master to switch master to host
+	ID:SWITCH_OVER; - commands master to switch master to host
 
 	ID:ASK_INFO; - asks about roles
 
 	ID:INFO;[role] - tells role (master, slave)
 
-	ID:VOTE;[id] - votes for host with id
+	ID:VOTE;[id;time] - votes for host with id
+
+	ID:START_VOTE; - asks for vote
