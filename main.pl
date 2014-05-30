@@ -37,6 +37,7 @@ sub get_ipv6;
 sub switch_to;
 sub switchover;
 sub votecount;
+sub onus1recv;
 
 ### Reading config
 
@@ -46,6 +47,8 @@ $config = Config::Tiny->read( 'mysql_repl.conf' );
 my %selfstatus;
 my %sql;
 my $master;
+my $tmp1;
+my $tmp2;
 
 $selfstatus{id} = $config->{settings}->{id};
 $selfstatus{hostname} = $config->{settings}->{hostname};
@@ -73,16 +76,17 @@ for my $x(keys %{$config}){
 	}
 }
 
+$hosts{$selfstatus{id}}->{address} = $selfstatus{address};
+$hosts{$selfstatus{id}}->{host} = $selfstatus{hostname};
+
+
 my $udp = AnyEvent::Handle::UDP->new(
 	bind => ["0.0.0.0", $selfstatus{port}],
 	on_recv => \&onrecieve,
 );
 
-my $signal = AnyEvent->signal (signal => "TERM", cb => sub {exit 0});
-my $signal = AnyEvent->signal (signal => "USR1", cb => sub{
-	$udp->push_send(qq($selfstatus{id}:SWITCH_OVER;),$hosts{master}->{address});
-});
-
+my $termsig= AnyEvent->signal (signal => "TERM", cb => sub {exit 0});
+my $switchsig = AnyEvent->signal (signal => "USR1", cb => \&onusr1recv);
 my $dbcheck = AnyEvent->timer(interval => 5, cb => \&dbcheck);
 my $check_slaves = AnyEvent->timer(interval => 5, cb => \&check_slave_status);
 
@@ -106,7 +110,7 @@ for my $x (keys %hosts){
 	$udp->push_send(qq($selfstatus{id}:ASK_INFO;),$hosts{$x}->{address});
 	$udp->push_send(qq($selfstatus{id}:INFO;$selfstatus{role}),$hosts{$x}->{address})
 }
-
+#
 sub check_db{
 	my $dbh = DBI->connect("DBI:mysql:mysql",
 							$sql{root}, $sql{rootpasswd},{RaiseError => 0});
@@ -151,6 +155,7 @@ sub onrecieve{
 	my ($data, $handle, $addr) = @_;
 	$data =~ /(\d+):([_A-Z]+);(.*)?/;
 	my($id ,$status, $args) = ($1, $2, $3);
+	warn "Recieved $data";
 	if($status eq "PING_OK"){ # status ok
 		$hosts{$id}->{status} = $status;
 		$hosts{$id}->{time} = $args;
@@ -163,7 +168,10 @@ sub onrecieve{
 	elsif($status eq "SWITCH_TO"){ # command switch
 		my($id, $file, $position) = split /;/,$args;
 		switch_to($hosts{$id}->{host}, $file,$position);
+		$hosts{$master}->{role} = "slave";
 		$master = $id;
+		$hosts{$id}->{role} = "master";
+		$selfstatus{role} = $hosts{$selfstatus{id}}->{role};
 	}
 	elsif($status eq "LOAD_FROM"){ # command to load
 			
@@ -173,10 +181,10 @@ sub onrecieve{
 		$dbh->do("FLUSH TABLES WITH READ LOCK");
 		$dbh->disconnect;
 		for my $x(keys %hosts){
-			$udp->push_send(qq($selfstatus{$id}:START_VOTE;), $hosts{$x}->{address});
+			$udp->push_send(qq($selfstatus{id}:START_VOTE;), $hosts{$x}->{address});
 		}
-		$udp->push_send(qq($selfstatus{$id}:START_VOTE;), $selfstatus{address});
-		my $tmp = AnyEvent->timer(after => 5, cb => \&votecount)
+		warn "Starts vote count";
+		$tmp1 = AnyEvent->timer(after => 5, cb => \&votecount)
 		
 	}
 	elsif($status eq "ASK_INFO"){
@@ -189,31 +197,32 @@ sub onrecieve{
 		}
 	}
 	elsif($status eq "VOTE"){
-		my($id, $time) = split /;/, $args;
-		$hosts{$id}->{vote}->{id} = $id;
+		my($vote, $time) = split /;/, $args;
+		$hosts{$id}->{vote}->{id} = $vote;
 		$hosts{$id}->{vote}->{time} = $time;
 	}
 	elsif($status eq "START_VOTE"){
 		my @tmp;
 		my $time = AnyEvent->now;
 		for my $x(keys %hosts){
-			if($hosts{$x}->{status} eq "PING_OK" || $x != $master){
+			if($hosts{$x}->{status} eq "PING_OK" && $x ne $master){
 				push @tmp, $x;
 			}
 		}
 		my $select = int(rand(scalar @tmp));
-		$udp->push_send(qq($selfstatus{id}:VOTE;@tmp[$select]), $hosts{$id}->{address});
+		$udp->push_send(qq($selfstatus{id}:VOTE;$tmp[$select];$time), $hosts{$id}->{address});
 	}
 	elsif($status eq "NEW_MASTER"){
+		warn "I would be new master";
 		my $waittime = 2;
 		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
-		my $sth = $dph->prepare("SHOW SLAVE STATUS");
+		my $sth = $dbh->prepare("SHOW SLAVE STATUS");
 		$sth->execute;
 		my $ref = $sth->fetchrow_hashref;
 		$waittime += $ref->{Seconds_Behind_Master};
 		$sth->finish;
 		$dbh->disconnect;
-		my $tmp = AnyEvent->timer(after => $waittime, cb => \&switchover);
+		$tmp2 = AnyEvent->timer(after => $waittime, cb => \&switchover);
 	}
 }
 
@@ -256,37 +265,44 @@ sub get_ipv6{
 sub switch_to{
 	my $hostname = shift;
 	my $filename = shift;
+	warn "Starts switch to host #$hostname";
 	my $position = shift;
 	my $query = qq(change master to master_host="$hostname", master_user="$sql{user}", master_password="$sql{passwd}", master_log_file="$filename", master_log_pos=$position);
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
-	eval {$dbh->do($query)};
-	$@ || warn qq(Couldn't done $query);
+	$dbh->do("STOP SLAVE");
+	$dbh->do($query);
+	$dbh->do("START SLAVE") if $hostname ne $selfstatus{hostname};
 	$dbh->do("UNLOCK TABLES");
 	$dbh->disconnect;
+	warn "Already switched to host #$hostname";
 }
 
 sub votecount{
+	warn "Vote starts";
 	my @tmp;
 	my $max = 0;
 	my $maxvote;
 	my $time = AnyEvent->now;
 	for my $x(keys %hosts){
+		warn "$time:$hosts{$x}->{vote}->{time}:$hosts{$x}->{status}:$hosts{$x}->{vote}->{id}:$x";
 		if($time - $hosts{$x}->{vote}->{time} < $selfstatus{maxdelay} && $hosts{$x}->{status} eq "PING_OK"){
 			$tmp[$hosts{$x}->{vote}->{id}]++;
 		}
 	}
-	for(my $i; $i<scalar(@tmp);$i++){
+	for(my $i; $i < scalar(@tmp);$i++){
+		warn "blablabla";
 		if($tmp[$i] > $max){
 			$max = $tmp[$i];
 			$maxvote = $i;
 		}
 	}
-
+	warn "New master will be #$maxvote";
 	$udp->push_send(qq($selfstatus{id}:NEW_MASTER;), $hosts{$maxvote}->{address});
 }
 
 sub switchover{
-	my $dbh = DBI->connect("DBI:mysql:mysql", $selfstatus{root}, $selfstatus{rootpasswd});
+	warn "Starting switchover";
+	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	my $sth = $dbh->prepare("SHOW MASTER STATUS");
 	$sth->execute;
 	my $ref = $sth->fetchrow_hashref;
@@ -294,11 +310,17 @@ sub switchover{
 	$dbh->disconnect;
 	my $file = $ref->{File};
 	my $pos = $ref->{Position};
-	for $x(keys %hosts){
+	for my $x(keys %hosts){
 		$udp->push_send(qq($selfstatus{id}:SWITCH_TO;$selfstatus{id};$file;$pos),$hosts{$x}->{address});
 	}
-	$udp->push_send(qq($selfstatus{id}:SWITCH_TO;$selfstatus{id};$file;$pos),$selfstatus{address});
 }
+
+sub onusr1recv{
+	warn "Get USR1 signal";
+	$udp->push_send(qq($selfstatus{id}:SWITCH_OVER;),$hosts{$master}->{address});
+	warn "SWITCH_OVER message is sent";
+}
+
 
 AnyEvent::Loop::run; # main loop
 
