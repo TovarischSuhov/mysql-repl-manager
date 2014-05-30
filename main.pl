@@ -36,6 +36,7 @@ sub get_ipv4;
 sub get_ipv6;
 sub switch_to;
 sub switchover;
+sub votecount;
 
 ### Reading config
 
@@ -72,12 +73,15 @@ for my $x(keys %{$config}){
 	}
 }
 
-my $signal = AnyEvent->signal (signal => "TERM", cb => sub {exit 0});
-
 my $udp = AnyEvent::Handle::UDP->new(
 	bind => ["0.0.0.0", $selfstatus{port}],
 	on_recv => \&onrecieve,
 );
+
+my $signal = AnyEvent->signal (signal => "TERM", cb => sub {exit 0});
+my $signal = AnyEvent->signal (signal => "USR1", cb => sub{
+	$udp->push_send(qq($selfstatus{id}:SWITCH_OVER;),$hosts{master}->{address});
+});
 
 my $dbcheck = AnyEvent->timer(interval => 5, cb => \&dbcheck);
 my $check_slaves = AnyEvent->timer(interval => 5, cb => \&check_slave_status);
@@ -171,7 +175,8 @@ sub onrecieve{
 		for my $x(keys %hosts){
 			$udp->push_send(qq($selfstatus{$id}:START_VOTE;), $hosts{$x}->{address});
 		}
-		my $tmp = AnyEvent->timer(after => 5, cb => \&switchover)
+		$udp->push_send(qq($selfstatus{$id}:START_VOTE;), $selfstatus{address});
+		my $tmp = AnyEvent->timer(after => 5, cb => \&votecount)
 		
 	}
 	elsif($status eq "ASK_INFO"){
@@ -192,12 +197,23 @@ sub onrecieve{
 		my @tmp;
 		my $time = AnyEvent->now;
 		for my $x(keys %hosts){
-			if($hosts{$x}->{status} eq "PING_OK"){
+			if($hosts{$x}->{status} eq "PING_OK" || $x != $master){
 				push @tmp, $x;
 			}
 		}
 		my $select = int(rand(scalar @tmp));
 		$udp->push_send(qq($selfstatus{id}:VOTE;@tmp[$select]), $hosts{$id}->{address});
+	}
+	elsif($status eq "NEW_MASTER"){
+		my $waittime = 2;
+		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
+		my $sth = $dph->prepare("SHOW SLAVE STATUS");
+		$sth->execute;
+		my $ref = $sth->fetchrow_hashref;
+		$waittime += $ref->{Seconds_Behind_Master};
+		$sth->finish;
+		$dbh->disconnect;
+		my $tmp = AnyEvent->timer(after => $waittime, cb => \&switchover);
 	}
 }
 
@@ -245,10 +261,11 @@ sub switch_to{
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	eval {$dbh->do($query)};
 	$@ || warn qq(Couldn't done $query);
+	$dbh->do("UNLOCK TABLES");
 	$dbh->disconnect;
 }
 
-sub switchover{
+sub votecount{
 	my @tmp;
 	my $max = 0;
 	my $maxvote;
@@ -264,19 +281,23 @@ sub switchover{
 			$maxvote = $i;
 		}
 	}
+
+	$udp->push_send(qq($selfstatus{id}:NEW_MASTER;), $hosts{$maxvote}->{address});
+}
+
+sub switchover{
 	my $dbh = DBI->connect("DBI:mysql:mysql", $selfstatus{root}, $selfstatus{rootpasswd});
 	my $sth = $dbh->prepare("SHOW MASTER STATUS");
 	$sth->execute;
 	my $ref = $sth->fetchrow_hashref;
 	$sth->finish;
 	$dbh->disconnect;
-
 	my $file = $ref->{File};
 	my $pos = $ref->{Position};
-	for my $x(keys %hosts){
-		$udp->push_send(qq($selfstatus{$id}:SWITCH_TO;$maxvote;$file;$pos), $hosts{$x}->{address});
+	for $x(keys %hosts){
+		$udp->push_send(qq($selfstatus{id}:SWITCH_TO;$selfstatus{id};$file;$pos),$hosts{$x}->{address});
 	}
-	$udp->push_send(qq($selfstatus{$id}:SWITCH_TO;$maxvote;$file;$pos), $selfstatus{address});
+	$udp->push_send(qq($selfstatus{id}:SWITCH_TO;$selfstatus{id};$file;$pos),$selfstatus{address});
 }
 
 AnyEvent::Loop::run; # main loop
@@ -303,3 +324,5 @@ __END__
 	ID:VOTE;[id;time] - votes for host with id
 
 	ID:START_VOTE; - asks for vote
+
+	ID:NEW_MASTER; - tels host that it is new master
