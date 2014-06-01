@@ -133,6 +133,7 @@ sub check_slave_status{
 		}
 		else{warn "Host #$x is OK"};
 	}
+	return;
 }
 
 sub dbcheck{
@@ -180,12 +181,15 @@ sub onrecieve{
 		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 		$dbh->do("FLUSH TABLES WITH READ LOCK");
 		$dbh->disconnect;
-		for my $x(keys %hosts){
-			$udp->push_send(qq($selfstatus{id}:START_VOTE;), $hosts{$x}->{address});
+		if(not $args){
+			for my $x(keys %hosts){
+				$udp->push_send(qq($selfstatus{id}:START_VOTE;), $hosts{$x}->{address});
+			}
+			$tmp1 = AnyEvent->timer(after => 5, cb => \&votecount);
 		}
-		warn "Starts vote count";
-		$tmp1 = AnyEvent->timer(after => 5, cb => \&votecount)
-		
+		else{
+			$udp->push_send(qq($selfstatus{id}:NEW_MASTER;), $hosts{$args}->{address});		
+		}
 	}
 	elsif($status eq "ASK_INFO"){
 		$udp->push_send(qq($selfstatus{id}:INFO;$selfstatus{role}), $hosts{$id}->{address});
@@ -292,7 +296,6 @@ sub votecount{
 		}
 	}
 	for(my $i; $i < scalar(@tmp);$i++){
-		warn "blablabla";
 		if($tmp[$i] > $max){
 			$max = $tmp[$i];
 			$maxvote = $i;
@@ -319,7 +322,19 @@ sub switchover{
 
 sub onusr1recv{
 	warn "Get USR1 signal";
-	$udp->push_send(qq($selfstatus{id}:SWITCH_OVER;),$hosts{$master}->{address});
+	my $newmaster = "";
+	open my $fh, "<", ".newmaster" or warn "File not exist";
+	my $hostname = <$fh>;
+	chomp $hostname;
+	for my $x(keys %hosts){
+		if($hostname eq $hosts{$x}->{host}){
+			$newmaster = $x;
+		}
+	}
+	close $fh;
+	unlink ".newmaster";
+	warn "New master is $newmaster";
+	$udp->push_send(qq($selfstatus{id}:SWITCH_OVER;$newmaster),$hosts{$master}->{address});
 	warn "SWITCH_OVER message is sent";
 }
 

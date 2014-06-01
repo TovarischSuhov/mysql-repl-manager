@@ -4,6 +4,15 @@ use strict;
 use warnings;
 use utf8;
 
+my $newmaster = shift @ARGV;
+if (defined $newmaster){
+	open my $fh, ">", ".newmaster";
+	print $fh $newmaster;
+	close $fh;
+}
+
+
 my $proclist = `ps ax`;
 $proclist =~ /\s*(\d+).*mysql-repl-manager/g;
 kill "USR1", $1;
+
