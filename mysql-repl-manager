@@ -8,7 +8,7 @@
 #  DESCRIPTION: 
 #
 #      OPTIONS: ---
-# REQUIREMENTS: Config::Tiny, AnyEvent, AnyEvent::Loop, AnyEvent::Handle::UDP, DBI, DBD::mysql
+# REQUIREMENTS: Config::Tiny, AnyEvent, AnyEvent::Loop, AnyEvent::Handle::UDP, DBI, DBD::mysql, Log::Dispatch
 #         BUGS: ---
 #        NOTES: ---
 #       AUTHOR: Ilya Suhov (), tovarischsuhov0@yandex.ru
@@ -27,6 +27,8 @@ use AnyEvent::Loop;
 use AnyEvent::Handle::UDP;
 use DBI;
 use DBD::mysql;
+use Log::Dispatch;
+use Log::Dispatch::File;
 
 sub onrecieve;
 sub dbcheck;
@@ -44,11 +46,23 @@ sub onus1recv;
 my $config = Config::Tiny->new;
 $config = Config::Tiny->read( 'mysql_repl.conf' );
 
+my $log = Log::Dispatch->new;
+
 my %selfstatus;
 my %sql;
 my $master;
 my $tmp1;
 my $tmp2;
+
+my $logfile = $config->{_}->{log};
+
+$log->add(
+	Log::Dispatch::File->new(
+		name => "log",
+		min_level => "debug",
+		filename => $logfile
+	)
+);
 
 $selfstatus{id} = $config->{settings}->{id};
 $selfstatus{hostname} = $config->{settings}->{hostname};
@@ -125,13 +139,15 @@ sub check_slave_status{
 	my $time = AnyEvent->now;
 	for my $x(keys %hosts){
 		if($hosts{$x}->{status} eq "DB_DOWN"){
-			AE::Log	warn => "Host #$x is droped";
+			$log->log(level => "warn", message => "Host #$x is droped\n");
 		}
 		elsif($time - $hosts{$x}->{time} > $selfstatus{maxdelay}){
 		$hosts{$x}->{status} = "DB_DOWN";
-			AE::Log warn => "Host #$x is droped now";
+			$log->log(level => "warn", message => "Host #$x is droped now\n");
 		}
-		else{AE::Log debug => "Host #$x is OK"};
+		else{
+			$log->log(level => "debug", message => "Host #$x is OK\n");
+		}
 	}
 	return;
 }
@@ -154,7 +170,7 @@ sub onrecieve{
 	my ($data, $handle, $addr) = @_;
 	$data =~ /(\d+):([_A-Z]+);(.*)?/;
 	my($id ,$status, $args) = ($1, $2, $3);
-	AE::Log debug => "Recieved $data";
+	$log->log(level => "debug", message => "Recieved $data\n");
 	if($status eq "PING_OK"){ # status ok
 		$hosts{$id}->{status} = $status;
 		$hosts{$id}->{time} = $args;
@@ -215,7 +231,7 @@ sub onrecieve{
 		}
 	}
 	elsif($status eq "NEW_MASTER"){
-		AE::Log info => "This host goes to be a new master";
+		$log->log(level => "info", message => "This host goes to be a new master\n");
 		my $waittime = 2;
 		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 		my $sth = $dbh->prepare("SHOW SLAVE STATUS");
@@ -243,7 +259,7 @@ sub get_address{
 		   return [get_ipv4($hostname), $selfstatus{port}];
 	}
 	else{
-		AE::Log warn => qq(Unknown protocol $selfstatus{protocol});
+		$log->log(level => "warn", message => qq(Unknown protocol $selfstatus{protocol}\n));
 	}
 	return $address;
 }
@@ -267,17 +283,16 @@ sub get_ipv6{
 sub switch_to{
 	my $hostname = shift;
 	my $filename = shift;
-	AE::Log info => "Starts switch to host #$hostname";
+	$log->log(level => "info", message => "Starts switch to host #$hostname\n");
 	my $position = shift;
 	my $query = qq(change master to master_host="$hostname", master_user="$sql{user}", master_password="$sql{passwd}", master_log_file="$filename", master_log_pos=$position);
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	$dbh->do("STOP SLAVE");
-	eval {$dbh->do($query);}
-	AE::Log warn => "Can't switch to host #$hostname." if $@;
+	$dbh->do($query);
 	$dbh->do("START SLAVE") if $hostname ne $selfstatus{hostname};
 	$dbh->do("UNLOCK TABLES");
 	$dbh->disconnect;
-	AE::Log info => "Already switched to host #$hostname";
+	$log->log(level => "info", message => "Already switched to host #$hostname\n");
 }
 
 sub votecount{
@@ -297,12 +312,12 @@ sub votecount{
 			$maxvote = $i;
 		}
 	}
-	AE::Log info => "New master will be #$maxvote";
+	$log->log(level => "info", message => "New master will be #$maxvote\n");
 	$udp->push_send(qq($selfstatus{id}:NEW_MASTER;), $hosts{$maxvote}->{address});
 }
 
 sub switchover{
-	AE::Log info => "Starting switchover";
+	$log->log(level => "info", message => "Starting switchover");
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	my $sth = $dbh->prepare("SHOW MASTER STATUS");
 	$sth->execute;
@@ -317,9 +332,9 @@ sub switchover{
 }
 
 sub onusr1recv{
-	AE::Log debug => "Get USR1 signal";
+	$log->log(level => "debug", message => "Get USR1 signal\n");
 	my $newmaster = "";
-	open my $fh, "<", ".newmaster" or warn "File not exist";
+	open my $fh, "<", ".newmaster";
 	my $hostname = <$fh>;
 	chomp $hostname;
 	for my $x(keys %hosts){
