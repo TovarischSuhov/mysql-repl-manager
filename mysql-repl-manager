@@ -210,7 +210,7 @@ sub onrecieve{
 			}
 		}
 		my $select = int(rand(scalar @tmp));
-		for $x(keys %hosts){
+		for my $x(keys %hosts){
 			$udp->push_send(qq($selfstatus{id}:VOTE;$tmp[$select];$time), $hosts{$x}->{address});
 		}
 	}
