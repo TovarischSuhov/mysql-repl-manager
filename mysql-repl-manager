@@ -125,13 +125,13 @@ sub check_slave_status{
 	my $time = AnyEvent->now;
 	for my $x(keys %hosts){
 		if($hosts{$x}->{status} eq "DB_DOWN"){
-			warn "Host #$x is droped";
+			AE::Log	warn => "Host #$x is droped";
 		}
 		elsif($time - $hosts{$x}->{time} > $selfstatus{maxdelay}){
 		$hosts{$x}->{status} = "DB_DOWN";
-		warn "Host #$x is droped now";
+			AE::Log warn => "Host #$x is droped now";
 		}
-		else{warn "Host #$x is OK"};
+		else{AE::Log debug => "Host #$x is OK"};
 	}
 	return;
 }
@@ -140,13 +140,11 @@ sub dbcheck{
 	my $time = AnyEvent->now;
 	if(check_db){ # check db status
 		for my $x(keys %hosts){
-#			warn qq(Send PING_OK to $x, $hosts{$x}->{address}->[0], $hosts{$x}->{address}->[1]);
 			$udp->push_send(qq($selfstatus{id}:PING_OK;$time),$hosts{$x}->{address});
 		}
 	}
 	else{
 		for my $x(keys %hosts){
-#			warn qq(Send DB_DOWN to $x, $hosts{$x}->{address}->[0], $hosts{$x}->{address}->[1]);
 			$udp->push_send(qq($selfstatus{id}:DB_DOWN;$time),$hosts{$x}->{address});
 		}	
 	}
@@ -156,15 +154,13 @@ sub onrecieve{
 	my ($data, $handle, $addr) = @_;
 	$data =~ /(\d+):([_A-Z]+);(.*)?/;
 	my($id ,$status, $args) = ($1, $2, $3);
-	warn "Recieved $data";
+	AE::Log debug => "Recieved $data";
 	if($status eq "PING_OK"){ # status ok
 		$hosts{$id}->{status} = $status;
 		$hosts{$id}->{time} = $args;
-#		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
 	}
 	elsif($status eq "DB_DOWN"){ # db is down
 		$hosts{$id}->{status} = $status;
-#		warn qq($id $hosts{$id}->{status} $hosts{$id}->{time}); # debuging info
 	}
 	elsif($status eq "SWITCH_TO"){ # command switch
 		my($id, $file, $position) = split /;/,$args;
@@ -219,7 +215,7 @@ sub onrecieve{
 		}
 	}
 	elsif($status eq "NEW_MASTER"){
-		warn "I would be new master";
+		AE::Log info => "This host goes to be a new master";
 		my $waittime = 2;
 		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 		my $sth = $dbh->prepare("SHOW SLAVE STATUS");
@@ -247,7 +243,7 @@ sub get_address{
 		   return [get_ipv4($hostname), $selfstatus{port}];
 	}
 	else{
-		warn qq(Unknown protocol $selfstatus{protocol})
+		AE::Log warn => qq(Unknown protocol $selfstatus{protocol});
 	}
 	return $address;
 }
@@ -271,16 +267,17 @@ sub get_ipv6{
 sub switch_to{
 	my $hostname = shift;
 	my $filename = shift;
-	warn "Starts switch to host #$hostname";
+	AE::Log info => "Starts switch to host #$hostname";
 	my $position = shift;
 	my $query = qq(change master to master_host="$hostname", master_user="$sql{user}", master_password="$sql{passwd}", master_log_file="$filename", master_log_pos=$position);
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	$dbh->do("STOP SLAVE");
-	$dbh->do($query);
+	eval {$dbh->do($query);}
+	AE::Log warn => "Can't switch to host #$hostname." if $@;
 	$dbh->do("START SLAVE") if $hostname ne $selfstatus{hostname};
 	$dbh->do("UNLOCK TABLES");
 	$dbh->disconnect;
-	warn "Already switched to host #$hostname";
+	AE::Log info => "Already switched to host #$hostname";
 }
 
 sub votecount{
@@ -290,7 +287,6 @@ sub votecount{
 	my $maxvote;
 	my $time = AnyEvent->now;
 	for my $x(keys %hosts){
-		warn "$time:$hosts{$x}->{vote}->{time}:$hosts{$x}->{status}:$hosts{$x}->{vote}->{id}:$x";
 		if($time - $hosts{$x}->{vote}->{time} < $selfstatus{maxdelay} && $hosts{$x}->{status} eq "PING_OK"){
 			$tmp[$hosts{$x}->{vote}->{id}]++;
 		}
@@ -301,12 +297,12 @@ sub votecount{
 			$maxvote = $i;
 		}
 	}
-	warn "New master will be #$maxvote";
+	AE::Log info => "New master will be #$maxvote";
 	$udp->push_send(qq($selfstatus{id}:NEW_MASTER;), $hosts{$maxvote}->{address});
 }
 
 sub switchover{
-	warn "Starting switchover";
+	AE::Log info => "Starting switchover";
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	my $sth = $dbh->prepare("SHOW MASTER STATUS");
 	$sth->execute;
@@ -321,7 +317,7 @@ sub switchover{
 }
 
 sub onusr1recv{
-	warn "Get USR1 signal";
+	AE::Log debug => "Get USR1 signal";
 	my $newmaster = "";
 	open my $fh, "<", ".newmaster" or warn "File not exist";
 	my $hostname = <$fh>;
@@ -333,9 +329,7 @@ sub onusr1recv{
 	}
 	close $fh;
 	unlink ".newmaster";
-	warn "New master is $newmaster";
 	$udp->push_send(qq($selfstatus{id}:SWITCH_OVER;$newmaster),$hosts{$master}->{address});
-	warn "SWITCH_OVER message is sent";
 }
 
 
