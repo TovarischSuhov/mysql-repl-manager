@@ -1,9 +1,9 @@
 #!/usr/bin/env perl 
 #===============================================================================
 #
-#         FILE: main.pl
+#         FILE: mysql-repl-manager
 #
-#        USAGE: ./main.pl  
+#        USAGE: ./mysql-repl-manager
 #
 #  DESCRIPTION: 
 #
@@ -210,7 +210,9 @@ sub onrecieve{
 			}
 		}
 		my $select = int(rand(scalar @tmp));
-		$udp->push_send(qq($selfstatus{id}:VOTE;$tmp[$select];$time), $hosts{$id}->{address});
+		for $x(keys %hosts){
+			$udp->push_send(qq($selfstatus{id}:VOTE;$tmp[$select];$time), $hosts{$x}->{address});
+		}
 	}
 	elsif($status eq "NEW_MASTER"){
 		warn "I would be new master";
