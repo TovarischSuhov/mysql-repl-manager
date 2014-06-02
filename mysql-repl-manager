@@ -13,7 +13,7 @@
 #        NOTES: ---
 #       AUTHOR: Ilya Suhov (), tovarischsuhov0@yandex.ru
 # ORGANIZATION: 
-#      VERSION: 1.0
+#      VERSION: 0.10
 #      CREATED: 10.05.2014 17:58:41
 #     REVISION: ---
 #===============================================================================
@@ -50,12 +50,14 @@ my $log = Log::Dispatch->new;
 
 my %selfstatus;
 my %sql;
+my %ssh;
 my $master;
 my $tmp1;
 my $tmp2;
 
 my $logfile = $config->{_}->{log};
 
+if(defined $DEBUG){
 $log->add(
 	Log::Dispatch::File->new(
 		name => "log",
@@ -63,6 +65,16 @@ $log->add(
 		filename => $logfile
 	)
 );
+}
+else{
+$log->add(
+	Log::Dispatch::File->new(
+		name => "log",
+		min_level => "info",
+		filename => $logfile
+	)
+);
+}
 
 $selfstatus{id} = $config->{settings}->{id};
 $selfstatus{hostname} = $config->{settings}->{hostname};
@@ -78,6 +90,8 @@ $sql{user} = $config->{sql}->{user};
 $sql{passwd} = $config->{sql}->{passwd};
 $sql{root} = $config->{sql}->{root};
 $sql{rootpasswd} = $config->{sql}->{rootpasswd};
+
+$ssh{user} = $config->{ssh}->{user};
 
 $selfstatus{address} = get_address($selfstatus{hostname});
 
@@ -142,7 +156,20 @@ sub check_slave_status{
 			$log->log(level => "warn", message => "Host #$x is droped\n");
 		}
 		elsif($time - $hosts{$x}->{time} > $selfstatus{maxdelay}){
-		$hosts{$x}->{status} = "DB_DOWN";
+			$hosts{$x}->{status} = "DB_DOWN";
+			if($x == $master){
+				my @tmp;
+				my $time = AnyEvent->now;
+				for my $x(keys %hosts){
+					if($hosts{$x}->{status} eq "PING_OK" && $x ne $master){
+						push @tmp, $x;
+					}
+				}
+				my $select = int(rand(scalar @tmp));
+				for my $x(keys %hosts){
+					$udp->push_send(qq($selfstatus{id}:VOTE;$tmp[$select];$time), $hosts{$x}->{address});
+				}
+			}
 			$log->log(level => "warn", message => "Host #$x is droped now\n");
 		}
 		else{
@@ -163,6 +190,7 @@ sub dbcheck{
 		for my $x(keys %hosts){
 			$udp->push_send(qq($selfstatus{id}:DB_DOWN;$time),$hosts{$x}->{address});
 		}	
+		
 	}
 }
 
@@ -187,7 +215,11 @@ sub onrecieve{
 		$selfstatus{role} = $hosts{$selfstatus{id}}->{role};
 	}
 	elsif($status eq "LOAD_FROM"){ # command to load
-			
+		`scp $ssh{user}@$hosts{$args}->{hostname}:/tmp/tmp.db ./tmp.db`;
+		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
+		$dbh->do("STOP SLAVE");
+		`mysql -u $sql{root} -p $sql{rootpasswd} < tmp.db`;
+		unlink "tmp.db";
 	}
 	elsif($status eq "SWITCH_OVER"){ # command to master to switch_over
 		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
