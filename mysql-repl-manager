@@ -40,6 +40,7 @@ sub switch_to;
 sub switchover;
 sub votecount;
 sub onus1recv;
+sub createdbdump;
 
 ### Reading config
 
@@ -54,6 +55,7 @@ my %ssh;
 my $master;
 my $tmp1;
 my $tmp2;
+my $DEBUG;
 
 my $logfile = $config->{_}->{log};
 
@@ -152,11 +154,31 @@ sub check_db{
 sub check_slave_status{
 	my $time = AnyEvent->now;
 	for my $x(keys %hosts){
-		if($hosts{$x}->{status} eq "DB_DOWN"){
+		if($hosts{$x}->{status} eq "DB_DOWN" || $hosts{$x}->{status} eq "HOST_DOWN"){
 			$log->log(level => "warn", message => "Host #$x is droped\n");
+			if($x == $master){
+				my @tmp;
+				my $max = 0;
+   				my $maxvote;
+    			my $time = AnyEvent->now;
+    			for my $x(keys %hosts){
+        			if($time - $hosts{$x}->{vote}->{time} < $selfstatus{maxdelay} && $hosts{$x}->{status} eq "PING_OK"){
+            		$tmp[$hosts{$x}->{vote}->{id}]++;
+        			}
+    			}   
+    			for(my $i; $i < scalar(@tmp);$i++){
+        			if($tmp[$i] > $max){
+            			$max = $tmp[$i];
+            			$maxvote = $i; 
+        			}
+    			}
+				if($maxvote == $selfstatus{id}){
+					createdbdump;			
+				}   
+			}
 		}
 		elsif($time - $hosts{$x}->{time} > $selfstatus{maxdelay}){
-			$hosts{$x}->{status} = "DB_DOWN";
+			$hosts{$x}->{status} = "HOST_DOWN";
 			if($x == $master){
 				my @tmp;
 				my $time = AnyEvent->now;
@@ -189,8 +211,9 @@ sub dbcheck{
 	else{
 		for my $x(keys %hosts){
 			$udp->push_send(qq($selfstatus{id}:DB_DOWN;$time),$hosts{$x}->{address});
+			$udp->push_send(qq($selfstatus{id}:START_VOTE;),$hosts{$x}->{address});
 		}	
-		
+				
 	}
 }
 
@@ -215,11 +238,16 @@ sub onrecieve{
 		$selfstatus{role} = $hosts{$selfstatus{id}}->{role};
 	}
 	elsif($status eq "LOAD_FROM"){ # command to load
-		`scp $ssh{user}@$hosts{$args}->{hostname}:/tmp/tmp.db ./tmp.db`;
-		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
-		$dbh->do("STOP SLAVE");
-		`mysql -u $sql{root} -p $sql{rootpasswd} < tmp.db`;
-		unlink "tmp.db";
+		if($args != $selfstatus{id}){
+			`scp $ssh{user}\@$hosts{$args}->{hostname}:/tmp/tmp.db ./tmp.db`;
+			my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
+			$dbh->do("STOP SLAVE");
+			`mysql -u $sql{root} -p $sql{rootpasswd} < tmp.db`;
+			unlink "tmp.db";
+			for my $x(keys %hosts){
+				$hosts{$x}->{time} = AnyEvent->now;
+			}	
+		}
 	}
 	elsif($status eq "SWITCH_OVER"){ # command to master to switch_over
 		my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
@@ -379,6 +407,21 @@ sub onusr1recv{
 	$udp->push_send(qq($selfstatus{id}:SWITCH_OVER;$newmaster),$hosts{$master}->{address});
 }
 
+sub createdbdump{
+	`mysqladmin -u $sql{root} -p $sql{rootpasswd }`;
+	my $dbh = DBI->connect("DBI:mysql:mysql",$sql{root},$sql{rootpasswd});
+	my $sth = $dbh->prepare("SHOW MASTER STATUS");
+	$sth->execute;
+	my $ref = $sth->fetchrow_hashref;
+	$sth->finish;
+	$dbh->disconnect;
+	my $file = $ref->{File};
+	my $pos = $ref->{Position};
+	for my $x(keys %hosts){
+		$udp->push_send(qq($selfstatus{id}:LOAD_FROM;$selfstatus{id}), $hosts{$x}->{address});
+		$udp->push_send(qq($selfstatus{id}:SWITCH_TO;$selfstatus{id};$file;$pos), $hosts{$x}->{address});
+	}
+}
 
 AnyEvent::Loop::run; # main loop
 
