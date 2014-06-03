@@ -103,6 +103,7 @@ for my $x(keys %{$config}){
 	$hosts{$config->{$x}->{id}}->{address} = get_address($config->{$x}->{address});
 	$hosts{$config->{$x}->{id}}->{host} = $config->{$x}->{address};
 	$hosts{$config->{$x}->{id}}->{status} = "PING_OK";
+	$hosts{$config->{$x}->{id}}->{time} = AnyEvent->now;
 	}
 }
 
