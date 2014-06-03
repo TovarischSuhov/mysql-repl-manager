@@ -55,11 +55,11 @@ my %ssh;
 my $master;
 my $tmp1;
 my $tmp2;
-my $DEBUG;
+my $DEBUG = 1;
 
 my $logfile = $config->{_}->{log};
 
-if(defined $DEBUG){
+if($DEBUG){
 $log->add(
 	Log::Dispatch::File->new(
 		name => "log",
@@ -349,6 +349,7 @@ sub switch_to{
 	my $query = qq(change master to master_host="$hostname", master_user="$sql{user}", master_password="$sql{passwd}", master_log_file="$filename", master_log_pos=$position);
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	$dbh->do("STOP SLAVE");
+	$dbh->do("RESET SLAVE");
 	$dbh->do($query);
 	$dbh->do("START SLAVE") if $hostname ne $selfstatus{hostname};
 	$dbh->do("UNLOCK TABLES");
@@ -409,7 +410,8 @@ sub onusr1recv{
 }
 
 sub createdbdump{
-	`mysqladmin -u $sql{root} -p $sql{rootpasswd }`;
+	$log->log(level => "info", message => "Started to create dbdump\n");
+	`mysqldump -u $sql{root} -p $sql{rootpasswd} --all-databases --master-data > /tmp/tmp.db`;
 	my $dbh = DBI->connect("DBI:mysql:mysql",$sql{root},$sql{rootpasswd});
 	my $sth = $dbh->prepare("SHOW MASTER STATUS");
 	$sth->execute;
