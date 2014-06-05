@@ -379,7 +379,7 @@ sub votecount{
 }
 
 sub switchover{
-	$log->log(level => "info", message => "Starting switchover");
+	$log->log(level => "info", message => "Starting switchover\n");
 	my $dbh = DBI->connect("DBI:mysql:mysql", $sql{root}, $sql{rootpasswd});
 	my $sth = $dbh->prepare("SHOW MASTER STATUS");
 	$sth->execute;
