@@ -411,7 +411,13 @@ sub onusr1recv{
 
 sub createdbdump{
 	$log->log(level => "info", message => "Started to create dbdump\n");
-	`mysqldump -u $sql{root} -p $sql{rootpasswd} --all-databases --master-data > /tmp/tmp.db`;
+	if($sql{rootpasswd}){
+		`mysqldump -u $sql{root} -p $sql{rootpasswd} --all-databases --master-data > /tmp/tmp.db`;
+	}
+	else{
+		`mysqldump -u $sql{root} --all-databases --master-data > /tmp/tmp.db`;
+	}
+	$log->log(level => "info", message => "Dbdump already created.\n");
 	my $dbh = DBI->connect("DBI:mysql:mysql",$sql{root},$sql{rootpasswd});
 	my $sth = $dbh->prepare("SHOW MASTER STATUS");
 	$sth->execute;
